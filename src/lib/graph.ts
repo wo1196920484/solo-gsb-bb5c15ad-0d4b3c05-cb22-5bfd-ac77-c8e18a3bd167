@@ -151,55 +151,54 @@ function shortestFrom(source: number, n: number, edges: DiffEdge[]): number[] {
   return dist
 }
 
+/** 负环检测结果：hasNegativeCycle 为 true 时 cycle 理论上必能抽出（抽不出时保守判负） */
+export interface CycleDetection {
+  hasNegativeCycle: boolean
+  cycle?: {
+    nodes: number[]
+    edges: DiffEdge[]
+    totalWeight: number
+  }
+}
+
 /**
- * 对当前全部启用的约束做完整分析：
- * 1) 超级源点 Bellman-Ford 检测差分系统是否可满足（有无负环）；
- * 2) 有负环时抽取一条矛盾环；
- * 3) 可满足时，以锚点为源求各事件相对锚点的最早/最晚时间窗。
+ * 对当前边集做负环检测（超级源点 Bellman-Ford）。
+ *
+ * 节点数为 0 时必然没有环，直接返回无环。
  */
-export function analyze(
-  events: TEvent[],
-  constraints: Constraint[],
-  anchorId: string | null,
-): AnalysisResult {
-  const n = events.length
-  const { edges } = buildEdges(events, constraints)
-  const windows = new Map<number, WindowInfo>()
-
-  if (n === 0) {
-    return { satisfiable: true, windows }
-  }
-
-  // —— 负环检测：等价于加入一个指向所有节点、权重 0 的超级源点，
+export function detectNegativeCycle(n: number, edges: DiffEdge[]): CycleDetection {
+  if (n === 0 || edges.length === 0) return { hasNegativeCycle: false }
+  // 等价于加入一个指向所有节点、权重 0 的超级源点，
   // 即所有节点初始距离为 0（差分约束经典做法）。
-  const { predEdge, lastRelaxed } = bellmanFord(
-    n,
-    edges,
-    new Array(n).fill(0),
-  )
-
-  if (lastRelaxed) {
-    const cyc = extractCycle(lastRelaxed, predEdge)
-    if (cyc) {
-      const totalWeight = cyc.edges.reduce((s, e) => s + e.w, 0)
-      return {
-        satisfiable: false,
-        cycle: { nodes: cyc.nodes, edges: cyc.edges, totalWeight },
-        windows,
-      }
-    }
-    // 理论上不会落到这里；保守起见按可满足处理但不给出窗口
-    return { satisfiable: false, windows }
+  const { predEdge, lastRelaxed } = bellmanFord(n, edges, new Array(n).fill(0))
+  if (!lastRelaxed) return { hasNegativeCycle: false }
+  const cyc = extractCycle(lastRelaxed, predEdge)
+  if (!cyc) {
+    // 理论上不会落到这里；保守起见仍判定存在负环（只是无法抽出）
+    return { hasNegativeCycle: true }
   }
+  return {
+    hasNegativeCycle: true,
+    cycle: { nodes: cyc.nodes, edges: cyc.edges, totalWeight: cyc.edges.reduce((s, e) => s + e.w, 0) },
+  }
+}
 
-  // —— 可满足：计算时间窗
-  const anchorIdx = anchorId != null ? events.findIndex((e) => e.id === anchorId) : -1
+/**
+ * 可满足前提下，以锚点为源求各事件相对锚点的最早/最晚时间窗。
+ * 未指定（或找不到）锚点时所有事件标记为“无法定时”。
+ */
+export function computeWindows(
+  n: number,
+  edges: DiffEdge[],
+  anchorIdx: number,
+): Map<number, WindowInfo> {
+  const windows = new Map<number, WindowInfo>()
   if (anchorIdx < 0) {
     // 未指定锚点：系统一致但无法给出绝对时间窗
     for (let i = 0; i < n; i++) {
       windows.set(i, { status: 'disconnected', earliestOffset: null, latestOffset: null })
     }
-    return { satisfiable: true, windows }
+    return windows
   }
 
   // 最晚偏移：t_i - t_anchor 的最小上界（正向最短路）
@@ -225,6 +224,36 @@ export function analyze(
 
     windows.set(i, { status, earliestOffset: earliest, latestOffset: latest })
   }
+  return windows
+}
 
-  return { satisfiable: true, cycle: undefined, windows }
+/**
+ * 对当前全部启用的约束做完整分析：
+ * 1) 超级源点 Bellman-Ford 检测差分系统是否可满足（有无负环）；
+ * 2) 有负环时抽取一条矛盾环；
+ * 3) 可满足时，以锚点为源求各事件相对锚点的最早/最晚时间窗。
+ */
+export function analyze(
+  events: TEvent[],
+  constraints: Constraint[],
+  anchorId: string | null,
+): AnalysisResult {
+  const n = events.length
+  const { edges } = buildEdges(events, constraints)
+
+  if (n === 0) {
+    return { satisfiable: true, windows: new Map() }
+  }
+
+  const detection = detectNegativeCycle(n, edges)
+  if (detection.hasNegativeCycle) {
+    if (detection.cycle) {
+      return { satisfiable: false, cycle: detection.cycle, windows: new Map() }
+    }
+    // 理论上不会落到这里；保守起见按不可满足处理但不给出环
+    return { satisfiable: false, windows: new Map() }
+  }
+
+  const anchorIdx = anchorId != null ? events.findIndex((e) => e.id === anchorId) : -1
+  return { satisfiable: true, cycle: undefined, windows: computeWindows(n, edges, anchorIdx) }
 }

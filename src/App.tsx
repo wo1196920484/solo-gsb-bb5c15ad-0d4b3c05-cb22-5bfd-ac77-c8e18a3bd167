@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
-import type { AppState, Constraint, TEvent } from './types'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { AppState, Constraint, RepairSolution, TEvent } from './types'
 import { analyze } from './lib/graph'
+import { findMinimumRepairs } from './lib/repair'
 import {
   buildConsistentSample,
   buildContradictionSample,
@@ -14,6 +15,7 @@ import EventEditor from './components/EventEditor'
 import ConstraintEditor from './components/ConstraintEditor'
 import GraphView from './components/GraphView'
 import CyclePanel from './components/CyclePanel'
+import RepairPanel from './components/RepairPanel'
 import WindowsTable from './components/WindowsTable'
 
 export default function App() {
@@ -24,13 +26,52 @@ export default function App() {
     saveState(state)
   }, [state])
 
+  // —— 修复方案预览：纯内存，不改动 state、不写 localStorage ——
+  // 真实数据（state 引用）一旦变化（编辑 / 应用 / 载入示例 / 清空）即自动退出预览。
+  const [previewDisabledIds, setPreviewDisabledIds] = useState<string[] | null>(null)
+  const stateRef = useRef(state)
+  useEffect(() => {
+    if (previewDisabledIds !== null && stateRef.current !== state) {
+      setPreviewDisabledIds(null)
+    }
+    stateRef.current = state
+  }, [state, previewDisabledIds])
+
   const { events, constraints, anchorId, anchorTime } = state
 
-  // —— 实时分析 ——
-  const result = useMemo(
-    () => analyze(events, constraints, anchorId),
-    [events, constraints, anchorId],
+  // —— 实时分析（预览时在“停用集”生效的临时约束上分析） ——
+  const effectiveConstraints = useMemo(
+    () =>
+      previewDisabledIds === null
+        ? constraints
+        : constraints.map((c) =>
+            previewDisabledIds.includes(c.id) ? { ...c, enabled: false } : c,
+          ),
+    [constraints, previewDisabledIds],
   )
+  const isPreviewing = previewDisabledIds !== null
+
+  const result = useMemo(
+    () => analyze(events, effectiveConstraints, anchorId),
+    [events, effectiveConstraints, anchorId],
+  )
+
+  // —— 最小修复搜索：仅在（未预览的）真实数据存在矛盾时执行 ——
+  const repairPlan = useMemo(() => {
+    if (isPreviewing) return null
+    // 非预览时 result 即基于真实 constraints
+    if (result.satisfiable) return null
+    return findMinimumRepairs(events, constraints, anchorId)
+  }, [isPreviewing, result.satisfiable, events, constraints, anchorId])
+
+  // 当前正在预览的方案下标（用于面板高亮）
+  const previewIndex = useMemo(() => {
+    if (!repairPlan || previewDisabledIds === null) return null
+    const key = (ids: string[]) => [...ids].sort().join('|')
+    const target = key(previewDisabledIds)
+    const idx = repairPlan.solutions.findIndex((s) => key(s.disableConstraintIds) === target)
+    return idx >= 0 ? idx : null
+  }, [repairPlan, previewDisabledIds])
 
   // 矛盾环相关集合（用于跨组件高亮）
   const cycleEventIds = useMemo(() => {
@@ -64,6 +105,7 @@ export default function App() {
   }, [result])
 
   const activeCount = constraints.filter((c) => c.enabled).length
+  const previewCount = previewDisabledIds?.length ?? 0
 
   // —— 编辑操作 ——
   const addEvent = (name: string, note: string) => {
@@ -123,12 +165,38 @@ export default function App() {
   const resetAll = () => {
     if (!window.confirm('确定清空全部事件、约束与本地存储数据吗？')) return
     clearState()
+    setPreviewDisabledIds(null)
     setState(emptyState())
+  }
+
+  // —— 修复方案：一键预览（仅内存）/ 确认应用（批量停用，写入本地） ——
+  const previewSolution = (index: number) => {
+    if (!repairPlan) return
+    setPreviewDisabledIds(repairPlan.solutions[index].disableConstraintIds)
+  }
+  const cancelPreview = () => setPreviewDisabledIds(null)
+  const applySolution = (solution: RepairSolution) => {
+    const kill = new Set(solution.disableConstraintIds)
+    setState((s) => ({
+      ...s,
+      constraints: s.constraints.map((c) =>
+        kill.has(c.id) ? { ...c, enabled: false } : c,
+      ),
+    }))
+    setPreviewDisabledIds(null)
   }
 
   // —— 顶部状态 ——
   const anchorExists = anchorId != null && events.some((e) => e.id === anchorId)
   const banner = (() => {
+    if (isPreviewing) {
+      return {
+        cls: 'ok',
+        icon: '👁️',
+        title: `修复方案预览中：临时停用 ${previewCount} 条约束，矛盾${result.satisfiable ? '已消除' : '仍存在'}`,
+        desc: '预览只在当前浏览器内存中生效，未修改任何约束、也未写入 localStorage。可「退出预览」返回原状，或在下方方案中「确认应用」批量停用。',
+      }
+    }
     if (events.length === 0) {
       return {
         cls: 'warn',
@@ -142,7 +210,7 @@ export default function App() {
         cls: 'danger',
         icon: '⛔',
         title: '约束相互矛盾，不存在任何可行的事件时间安排',
-        desc: `差分约束图中检测到负环（环上权重之和为 ${result.cycle?.totalWeight} 分钟 < 0）。红色标出的环即一条可复核的矛盾链：请核对对应证词或记录。`,
+        desc: `差分约束图中检测到负环（环上权重之和为 ${result.cycle?.totalWeight} 分钟 < 0）。红色标出的环即一条可复核的矛盾链：请核对对应证词或记录；下方「最小修复建议」给出停用约束最少的修复方案。`,
       }
     }
     if (!anchorExists) {
@@ -211,28 +279,38 @@ export default function App() {
         <div>
           <h2>{banner.title}</h2>
           <p>{banner.desc}</p>
-          {!result.satisfiable && result.cycle && (
+          {isPreviewing && (
+            <div className="preview-actions">
+              <button className="small primary" onClick={cancelPreview}>
+                退出预览（恢复原状）
+              </button>
+            </div>
+          )}
+          {!isPreviewing && !result.satisfiable && result.cycle && (
             <CyclePanel cycle={result.cycle} events={events} constraints={constraints} />
           )}
         </div>
       </div>
 
-      {/* 差分图 */}
+      {/* 差分图（预览时展示修复后的图：被停用约束的边消失） */}
       <div className="panel graph-panel" style={{ marginBottom: 16 }}>
         <h3>
           差分约束图
-          <span className="count">边标签 w 表示 t终点 − t起点 ≤ w（分钟）</span>
+          <span className="count">
+            边标签 w 表示 t终点 − t起点 ≤ w（分钟）
+            {isPreviewing && ' · 修复方案预览（临时视图）'}
+          </span>
         </h3>
         <GraphView
           events={events}
-          constraints={constraints}
+          constraints={effectiveConstraints}
           anchorId={anchorId}
           cycleNodes={cycleNodeIdx}
           cycleEdgeIds={cycleEdgeIds}
         />
       </div>
 
-      {/* 编辑器 */}
+      {/* 编辑器（预览时为只读，展示应用后的启用/停用状态） */}
       <div className="grid-2">
         <EventEditor
           events={events}
@@ -242,18 +320,37 @@ export default function App() {
           onRemove={removeEvent}
           onRename={renameEvent}
           onSetAnchor={setAnchor}
+          readOnly={isPreviewing}
         />
         <ConstraintEditor
           events={events}
-          constraints={constraints}
+          constraints={effectiveConstraints}
           cycleConstraintIds={cycleConstraintIds}
           onAdd={addConstraint}
           onRemove={removeConstraint}
           onUpdate={updateConstraint}
+          readOnly={isPreviewing}
         />
       </div>
 
-      {/* 时间窗 */}
+      {/* 最小修复建议（仅在真实数据存在矛盾时搜索并展示） */}
+      {!isPreviewing && repairPlan && (
+        <div style={{ marginBottom: 16 }}>
+          <RepairPanel
+            plan={repairPlan}
+            events={events}
+            constraints={constraints}
+            anchorId={anchorId}
+            anchorTime={anchorTime}
+            previewIndex={previewIndex}
+            onPreview={previewSolution}
+            onCancelPreview={cancelPreview}
+            onApply={applySolution}
+          />
+        </div>
+      )}
+
+      {/* 时间窗（预览时同样展示修复后的时间窗） */}
       {result.satisfiable && (
         <WindowsTable
           events={events}
@@ -265,7 +362,10 @@ export default function App() {
       )}
 
       <div className="footer-note">
-        数据自动保存在浏览器 localStorage，刷新不丢失 · 停用某条约束可即时验证“去掉该证词后矛盾是否消除”
+        数据自动保存在浏览器 localStorage，刷新不丢失 ·
+        {isPreviewing
+          ? ' 当前处于修复方案预览：仅内存生效，未写入 localStorage'
+          : ' 停用某条约束可即时验证“去掉该证词后矛盾是否消除”'}
       </div>
     </div>
   )

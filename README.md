@@ -10,9 +10,14 @@ Constraint System）并完成：
 1. **可满足性实时判定** —— 约束间一旦矛盾（图中出现负环）立即报警；
 2. **矛盾环高亮复核** —— 突出显示一条具体的矛盾环：图上红色节点/边、约束列表红色行，
    并逐条列出环上的差分不等式，求和得到 `0 ≤ 负数` 的代数证据，映射回原始证词；
-3. **时间窗计算** —— 可满足时给出每个事件相对锚点的**最早 / 最晚偏移**与对应的绝对时间；
-4. **无法定时标记** —— 与锚点在图上没有有向通路的事件标记为「无法定时」；
-5. **示例数据 + 本地持久化** —— 内置「事故复盘（可满足）」与「采访证词冲突」两套示例，
+3. **最小修复建议** —— 检测到矛盾时，以每次发现的负环为分支依据做分支限界搜索，
+   给出**停用约束数量最少**的可满足方案；并列最优方案最多展示 5 个、按约束录入顺序
+   稳定排序；每个方案列出需停用的约束与修复后的事件时间窗，支持**不写入 localStorage
+   的一键预览**与**确认应用（批量停用对应约束）**；累计搜索超过 2000 个状态即停止并
+   明确标记结果可能不完备；
+4. **时间窗计算** —— 可满足时给出每个事件相对锚点的**最早 / 最晚偏移**与对应的绝对时间；
+5. **无法定时标记** —— 与锚点在图上没有有向通路的事件标记为「无法定时」；
+6. **示例数据 + 本地持久化** —— 内置「事故复盘（可满足）」与「采访证词冲突」两套示例，
    全部编辑内容自动保存在浏览器 `localStorage`。
 
 技术栈：React 18 + TypeScript + Vite，纯前端、无后端依赖。
@@ -76,12 +81,24 @@ npm run preview   # 本地预览生产构建（http://localhost:4173）
 ### 算法自测
 
 ```bash
-npx esbuild scripts/test-graph.ts --bundle --platform=node --format=esm \
-  --outfile=/tmp/test-graph.mjs && node /tmp/test-graph.mjs
+npm test          # 依次运行 test:graph 与 test:repair 两套自测
 ```
 
-覆盖：约束→差分边转换、可满足示例的窗口数值、负环提取与边/节点对齐、
+等价于：
+
+```bash
+npx esbuild scripts/test-graph.ts  --bundle --platform=node --format=esm \
+  --outfile=/tmp/test-graph.mjs  && node /tmp/test-graph.mjs
+npx esbuild scripts/test-repair.ts --bundle --platform=node --format=esm \
+  --outfile=/tmp/test-repair.mjs && node /tmp/test-repair.mjs
+```
+
+`test-graph` 覆盖：约束→差分边转换、可满足示例的窗口数值、负环提取与边/节点对齐、
 精确间隔退化为点、无锚点、双向冲突等用例。
+
+`test-repair` 覆盖：可满足系统无需修复、单环 3 方案、两个不相交负环的最小击中集
+（停用 2 条、4 个组合方案及字典序）、6 条并列方案只展示录入顺序最前的 5 个、
+预算截断（`truncated` 与不完备标记）、已停用约束不参与候选、修复后窗口数值等用例。
 
 ---
 
@@ -107,9 +124,14 @@ npx esbuild scripts/test-graph.ts --bundle --platform=node --format=esm \
    填写分钟区间 `x ~ y`（要求 `0 ≤ x ≤ y`；`x = y` 表示精确间隔）；
 4. **查看实时结论**：
    - 顶部绿色横幅：系统可满足，底部表格给出每个事件的时间窗；
-   - 红色横幅：存在矛盾，红色矛盾环给出可逐步复核的不等式链；
+   - 红色横幅：存在矛盾，红色矛盾环给出可逐步复核的不等式链，
+     下方「最小修复建议」给出停用约束最少的修复方案；
    - 黄色「无法定时」：该事件与锚点之间没有任何约束通路，请补充连接二者的约束；
-5. **核对矛盾**：可逐条**取消勾选**可疑证词，观察矛盾环是否消失，快速定位冲突来源。
+5. **核对矛盾**：可逐条**取消勾选**可疑证词，观察矛盾环是否消失，快速定位冲突来源；
+6. **应用最小修复**：在修复方案卡片上点「一键预览」，在**不修改任何数据、不写入
+   localStorage** 的前提下临时查看修复后的差分图、约束启用状态与时间窗（编辑器进入
+   只读，随时「退出预览」恢复原状）；确认方案无误后点「确认应用」，系统批量停用该
+   方案涉及的约束并正常持久化。真实数据一旦被编辑，预览会自动退出。
 
 ### 状态图例（时间窗表）
 
@@ -139,6 +161,21 @@ npx esbuild scripts/test-graph.ts --bundle --platform=node --format=esm \
 - **时间窗**：以锚点为源跑最短路得到各事件「最晚偏移」`t_i − t_anchor` 的最小上界；
   在反向图上跑最短路得到「最早偏移」。正/反向均不可达即为「无法定时」。
 
+### 最小修复搜索（负环分支的分支限界）
+
+停用若干约束使系统恢复一致，等价于求**负环族的最小击中集**（NP 难），本应用采用
+按层（BFS）分支限界：
+
+1. 状态 = 当前已停用的约束集合（bigint 位集），初始状态为空集；
+2. 对状态做一次超级源点 Bellman-Ford：无负环即为可行方案。BFS 保证第一批可行状态
+   的停用数就是**全局最小值**；
+3. 检出负环时，取出环上涉及且尚未停用的原始约束，按**录入顺序**逐个分叉（修复必须
+   至少停用环上一条约束，保证不漏解），并用全局 visited 去重；
+4. 收集最小层的全部可行方案，按「停用约束下标序列」的字典序（即录入顺序）稳定排序，
+   最多展示前 5 个，每个方案附修复后的时间窗；
+5. 累计负环判定达到 **2000 个状态**即停止并标记结果**可能不完备**（此时已找到的
+   方案停用数仍为最小值，仅可能漏掉并列方案或在无解时无法确认）。
+
 ---
 
 ## 项目结构
@@ -152,10 +189,11 @@ npx esbuild scripts/test-graph.ts --bundle --platform=node --format=esm \
 ├── vite.config.ts
 ├── src
 │   ├── main.tsx
-│   ├── App.tsx             # 状态管理、实时分析、布局
-│   ├── types.ts            # 领域类型
+│   ├── App.tsx             # 状态管理、实时分析、修复预览/应用、布局
+│   ├── types.ts            # 领域类型（含 RepairPlan / RepairSolution）
 │   ├── lib
-│   │   ├── graph.ts        # 差分图构建 / Bellman-Ford / 负环提取 / 时间窗
+│   │   ├── graph.ts        # 差分图构建 / Bellman-Ford / 负环检测提取 / 时间窗
+│   │   ├── repair.ts       # 最小修复：负环分支的分支限界搜索（2000 状态上限、Top5）
 │   │   ├── samples.ts      # 两套示例数据
 │   │   ├── storage.ts      # localStorage 持久化
 │   │   └── format.ts       # 时间与自然语言格式化
@@ -164,6 +202,9 @@ npx esbuild scripts/test-graph.ts --bundle --platform=node --format=esm \
 │       ├── EventEditor.tsx
 │       ├── ConstraintEditor.tsx
 │       ├── CyclePanel.tsx       # 矛盾环不等式复核
-│       └── WindowsTable.tsx     # 最早/最晚时间窗表
-└── scripts/test-graph.ts   # 算法测试
+│       ├── RepairPanel.tsx      # 最小修复方案：预览 / 确认应用
+│       └── WindowsTable.tsx     # 最早/最晚时间窗表（修复方案内复用）
+└── scripts
+    ├── test-graph.ts       # 图与时间窗算法测试
+    └── test-repair.ts      # 最小修复搜索测试
 ```

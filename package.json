@@ -8,7 +8,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
-    "test": "esbuild scripts/test-graph.ts --bundle --platform=node --format=esm --outfile=/tmp/test-graph.mjs && node /tmp/test-graph.mjs"
+    "test": "npm run test:graph && npm run test:repair",
+    "test:graph": "esbuild scripts/test-graph.ts --bundle --platform=node --format=esm --outfile=/tmp/test-graph.mjs && node /tmp/test-graph.mjs",
+    "test:repair": "esbuild scripts/test-repair.ts --bundle --platform=node --format=esm --outfile=/tmp/test-repair.mjs && node /tmp/test-repair.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

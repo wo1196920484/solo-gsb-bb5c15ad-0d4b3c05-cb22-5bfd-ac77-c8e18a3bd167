@@ -8,6 +8,8 @@ interface Props {
   onAdd: (c: Omit<Constraint, 'id'>) => void
   onRemove: (id: string) => void
   onUpdate: (id: string, patch: Partial<Constraint>) => void
+  /** 修复方案预览时只读：禁止一切编辑（预览不写入数据） */
+  readOnly?: boolean
 }
 
 export default function ConstraintEditor({
@@ -17,6 +19,7 @@ export default function ConstraintEditor({
   onAdd,
   onRemove,
   onUpdate,
+  readOnly = false,
 }: Props) {
   const [aId, setAId] = useState('')
   const [relation, setRelation] = useState<Relation>('earlier')
@@ -36,16 +39,17 @@ export default function ConstraintEditor({
   const canAdd = events.length >= 2 && aId && bId && aId !== bId && rangeValid
 
   const submit = () => {
-    if (!canAdd) return
+    if (!canAdd || readOnly) return
     onAdd({ aId, bId, relation, min: minNum, max: maxNum, enabled: true })
   }
 
   return (
-    <div className="panel">
+    <div className={`panel${readOnly ? ' preview-readonly' : ''}`}>
       <h3>
         时序约束
         <span className="count">
           {constraints.filter((c) => c.enabled).length}/{constraints.length} 条生效
+          {readOnly ? ' · 预览只读' : ''}
         </span>
       </h3>
 
@@ -66,11 +70,13 @@ export default function ConstraintEditor({
               <input
                 type="checkbox"
                 checked={c.enabled}
+                disabled={readOnly}
                 onChange={(e) => onUpdate(c.id, { enabled: e.target.checked })}
                 title="启用 / 停用该约束"
               />
               <select
                 value={c.aId}
+                disabled={readOnly}
                 onChange={(e) => onUpdate(c.id, { aId: e.target.value })}
                 aria-label="事件 A"
               >
@@ -82,6 +88,7 @@ export default function ConstraintEditor({
               </select>
               <select
                 value={c.relation}
+                disabled={readOnly}
                 onChange={(e) => onUpdate(c.id, { relation: e.target.value as Relation })}
                 aria-label="关系"
               >
@@ -90,6 +97,7 @@ export default function ConstraintEditor({
               </select>
               <select
                 value={c.bId}
+                disabled={readOnly}
                 onChange={(e) => onUpdate(c.id, { bId: e.target.value })}
                 aria-label="事件 B"
               >
@@ -104,6 +112,7 @@ export default function ConstraintEditor({
                 type="number"
                 min={0}
                 value={c.min}
+                disabled={readOnly}
                 onChange={(e) => onUpdate(c.id, { min: Number(e.target.value) })}
                 aria-label="最小分钟数"
               />
@@ -113,11 +122,12 @@ export default function ConstraintEditor({
                 type="number"
                 min={0}
                 value={c.max}
+                disabled={readOnly}
                 onChange={(e) => onUpdate(c.id, { max: Number(e.target.value) })}
                 aria-label="最大分钟数"
               />
               <span className="sep">分钟</span>
-              <button className="small danger-ghost" onClick={() => onRemove(c.id)}>
+              <button className="small danger-ghost" disabled={readOnly} onClick={() => onRemove(c.id)}>
                 删除
               </button>
             </div>
@@ -131,7 +141,7 @@ export default function ConstraintEditor({
       })}
 
       {events.length >= 2 && (
-        <div className="add-row">
+        <fieldset className="add-row" disabled={readOnly} style={{ border: 'none', padding: 0, margin: '10px 0 0' }}>
           <select value={aId} onChange={(e) => setAId(e.target.value)} aria-label="新约束事件 A">
             <option value="">事件 A…</option>
             {events.map((e) => (
@@ -179,7 +189,7 @@ export default function ConstraintEditor({
           >
             添加约束
           </button>
-        </div>
+        </fieldset>
       )}
     </div>
   )
