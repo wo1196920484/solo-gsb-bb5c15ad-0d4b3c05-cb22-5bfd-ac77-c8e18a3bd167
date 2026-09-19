@@ -7,6 +7,8 @@ interface Props {
   cycleEventIds: Set<string>
   anchorId: string | null
   anchorTime: string
+  /** 嵌入修复方案卡片时复用，不再渲染外层面板标题 */
+  embedded?: boolean
 }
 
 const STATUS_META: Record<WindowInfo['status'], { label: string; cls: string; hint: string }> = {
@@ -22,13 +24,16 @@ export default function WindowsTable({
   cycleEventIds,
   anchorId,
   anchorTime,
+  embedded = false,
 }: Props) {
   return (
-    <div className="panel">
-      <h3>
-        各事件相对锚点的时间窗
-        <span className="count">最早 ≤ 实际时间 ≤ 最晚</span>
-      </h3>
+    <div className="panel" style={embedded ? { padding: 0, border: 'none', background: 'transparent' } : undefined}>
+      {!embedded && (
+        <h3>
+          各事件相对锚点的时间窗
+          <span className="count">最早 ≤ 实际时间 ≤ 最晚</span>
+        </h3>
+      )}
       {!anchorId && <div className="empty-hint">请在事件列表中点选单选按钮指定锚点事件。</div>}
       <div style={{ overflowX: 'auto' }}>
         <table className="windows">

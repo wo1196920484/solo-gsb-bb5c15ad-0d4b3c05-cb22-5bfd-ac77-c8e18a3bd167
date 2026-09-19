@@ -74,3 +74,33 @@ export interface WindowInfo {
   /** 相对锚点最晚偏移（分钟）；单边/不可达时可能为 null（+∞） */
   latestOffset: number | null
 }
+
+/**
+ * 最小修复方案：停用 disableConstraintIds 中的约束后，差分系统恢复可满足。
+ */
+export interface RepairPlan {
+  /** 建议停用的约束 id（按约束录入顺序升序排列） */
+  disableConstraintIds: string[]
+  /** 停用上述约束后，每个事件相对锚点的时间窗 */
+  windows: Map<number, WindowInfo>
+}
+
+/** 最小修复搜索结果 */
+export interface RepairSearchResult {
+  /** 是否找到至少一个可满足修复方案 */
+  found: boolean
+  /** 并列最优方案，最多 5 个，按需停用约束的录入顺序稳定排序 */
+  plans: RepairPlan[]
+  /** 已找到的并列最优方案总数（可能大于 plans.length；截断时为下界） */
+  totalPlans: number
+  /** 每个方案需停用的约束数量（found 为 true 时即已证明的最小停用数） */
+  disableCount: number
+  /** 是否因达到累计状态数上限而提前停止（结果可能不完备） */
+  truncated: boolean
+  /** 最小停用数是否已被证明（found 为 true 时恒为 true） */
+  optimumProven: boolean
+  /** 累计访问的搜索状态数 */
+  statesVisited: number
+  /** 状态数上限（默认 2000） */
+  stateLimit: number
+}

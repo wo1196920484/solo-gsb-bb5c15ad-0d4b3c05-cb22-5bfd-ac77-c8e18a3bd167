@@ -1,6 +1,7 @@
 import { analyze, buildEdges, constraintToEdges } from '../src/lib/graph'
+import { DEFAULT_STATE_LIMIT, findMinimalRepairs, MAX_PLANS } from '../src/lib/repair'
 import { buildConsistentSample, buildContradictionSample } from '../src/lib/samples'
-import type { Constraint } from '../src/types'
+import type { Constraint, TEvent } from '../src/types'
 
 let passed = 0
 let failed = 0
@@ -135,6 +136,167 @@ function approxEq(a: number | null, b: number | null) {
   // A earlier B 10..20: A->B +20, B->A -10
   // 环 A->B(-5) B->A(-10) = -15 <0 ✓
   assert(r.cycle !== undefined && r.cycle.totalWeight < 0, '两点负环权重为负')
+}
+
+// ---- 最小修复：矛盾示例最少停用 1 条，3 个并列方案 ----
+{
+  const s = buildContradictionSample()
+  const r = findMinimalRepairs(s.events, s.constraints, s.anchorId)
+  assert(r.found, '矛盾示例找到修复方案')
+  assert(r.disableCount === 1, '矛盾示例最少停用 1 条')
+  assert(r.optimumProven && !r.truncated, '最优性已证明且未截断')
+  assert(r.totalPlans === 3, `3 个并列最优方案（实际 ${r.totalPlans}）`)
+  assert(r.plans.length === 3, '展示全部 3 个方案（≤5）')
+
+  // 每个方案停用 1 条环上约束（前 3 条构成负环；第 4 条是无关正常约束）
+  const ringIds = s.constraints.slice(0, 3).map((c) => c.id)
+  const unrelatedId = s.constraints[3].id
+  for (const plan of r.plans) {
+    assert(plan.disableConstraintIds.length === 1, '每个方案停用恰好 1 条')
+    assert(ringIds.includes(plan.disableConstraintIds[0]), '停用的是矛盾环上的约束')
+    assert(!plan.disableConstraintIds.includes(unrelatedId), '不会建议停用无关约束')
+  }
+
+  // 方案按约束录入顺序稳定排序
+  const orders = r.plans.map((p) => s.constraints.findIndex((c) => c.id === p.disableConstraintIds[0]))
+  assert(JSON.stringify(orders) === JSON.stringify([0, 1, 2]), '方案按录入顺序排序')
+
+  // 每个方案修复后系统确实可满足，且时间窗可计算
+  for (const plan of r.plans) {
+    const off = new Set(plan.disableConstraintIds)
+    const sim = s.constraints.map((c) => (off.has(c.id) ? { ...c, enabled: false } : c))
+    const ar = analyze(s.events, sim, s.anchorId)
+    assert(ar.satisfiable, '按方案停用后系统可满足')
+    assert(plan.windows.get(0)?.status === 'anchor', '方案时间窗：锚点正确')
+  }
+}
+
+// ---- 最小修复：两个互不相交的负环需各停 1 条（最少 2 条，9 个并列方案）----
+{
+  const events: TEvent[] = [
+    { id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' },
+    { id: 'd', name: 'D' }, { id: 'e', name: 'E' }, { id: 'f', name: 'F' },
+  ]
+  const cs: Constraint[] = [
+    // 环 1：A-B-C
+    { id: 'c1', aId: 'b', bId: 'a', relation: 'later', min: 10, max: 20, enabled: true },
+    { id: 'c2', aId: 'c', bId: 'b', relation: 'later', min: 5, max: 10, enabled: true },
+    { id: 'c3', aId: 'a', bId: 'c', relation: 'later', min: 10, max: 30, enabled: true },
+    // 环 2：D-E-F
+    { id: 'c4', aId: 'e', bId: 'd', relation: 'later', min: 10, max: 20, enabled: true },
+    { id: 'c5', aId: 'f', bId: 'e', relation: 'later', min: 5, max: 10, enabled: true },
+    { id: 'c6', aId: 'd', bId: 'f', relation: 'later', min: 10, max: 30, enabled: true },
+  ]
+  assert(!analyze(events, cs, 'a').satisfiable, '双环系统存在矛盾')
+  const r = findMinimalRepairs(events, cs, 'a')
+  assert(r.found && r.disableCount === 2, '双环最少停用 2 条')
+  assert(r.totalPlans === 9, `9 个并列方案（3×3，实际 ${r.totalPlans}）`)
+  assert(r.plans.length === MAX_PLANS, '最多展示 5 个')
+  assert(!r.truncated, '9 个状态的搜索远未达上限，不截断')
+
+  // 每个方案必须两环各命中一条
+  for (const plan of r.plans) {
+    const idx = plan.disableConstraintIds.map((id) => cs.findIndex((c) => c.id === id))
+    assert(idx.length === 2, '方案停用 2 条')
+    assert(idx[0] < 3 && idx[1] >= 3, '两环各停用 1 条')
+  }
+  // 展示的是字典序最小的 5 个：[0,3],[0,4],[0,5],[1,3],[1,4]
+  const firstFive = r.plans.map((p) =>
+    p.disableConstraintIds.map((id) => cs.findIndex((c) => c.id === id)),
+  )
+  assert(
+    JSON.stringify(firstFive) === JSON.stringify([[0, 3], [0, 4], [0, 5], [1, 3], [1, 4]]),
+    '截断展示录入顺序最靠前的 5 个',
+  )
+}
+
+// ---- 最小修复：两环共用一条约束时，停用该共用约束为唯一最优 ----
+{
+  const events: TEvent[] = [
+    { id: 'a', name: 'A' }, { id: 'b', name: 'B' },
+    { id: 'c', name: 'C' }, { id: 'd', name: 'D' },
+  ]
+  const cs: Constraint[] = [
+    { id: 'g', aId: 'a', bId: 'b', relation: 'earlier', min: 30, max: 40, enabled: true }, // 共用边
+    { id: 'x', aId: 'c', bId: 'a', relation: 'later', min: 0, max: 10, enabled: true },
+    { id: 'y', aId: 'b', bId: 'c', relation: 'later', min: 0, max: 10, enabled: true },
+    { id: 'p', aId: 'd', bId: 'a', relation: 'later', min: 0, max: 10, enabled: true },
+    { id: 'q', aId: 'b', bId: 'd', relation: 'later', min: 0, max: 10, enabled: true },
+  ]
+  assert(!analyze(events, cs, 'a').satisfiable, '双环（共用边）存在矛盾')
+  const r = findMinimalRepairs(events, cs, 'a')
+  assert(r.found && r.disableCount === 1, '共用约束使最少停用数为 1')
+  assert(r.totalPlans === 1 && r.plans.length === 1, '唯一最优方案')
+  assert(r.plans[0].disableConstraintIds[0] === 'g', '唯一方案即停用共用约束')
+  // 停用共用约束后 A/B 仍有窗口：B 受 0..10 链路约束相对 A
+  const wb = r.plans[0].windows.get(1)!
+  assert(wb.status === 'bounded', '修复后 B 仍可定时')
+}
+
+// ---- 最小修复：状态数上限触发，明确标记可能不完备 ----
+{
+  const s = buildContradictionSample()
+  // stateLimit = 1：只分析根状态（未分支）即达上限，找不到方案
+  const r0 = findMinimalRepairs(s.events, s.constraints, s.anchorId, { stateLimit: 1 })
+  assert(!r0.found, '上限 1（仅根状态）时未找到方案')
+  assert(r0.truncated && !r0.optimumProven, '标记截断且最优性未证明')
+  assert(r0.stateLimit === 1 && r0.statesVisited === 1, '回传上限与已访问状态数')
+
+  // stateLimit = 3：根 + 2 个一层状态；三个环约束各停 1 条都可行，
+  // 第 3 个并列方案未探索到 -> 找到最优但列表可能不完备
+  const r1 = findMinimalRepairs(s.events, s.constraints, s.anchorId, { stateLimit: 3 })
+  assert(r1.found && r1.disableCount === 1, '上限 3 时在第 1 层找到最优')
+  assert(r1.truncated, '同层未探索完：标记截断（结果可能不完备）')
+  assert(r1.plans.length === 2, '只展示已探索到的 2 个并列方案')
+
+  // 双环系统：根 1 + 一层 3 个状态均不可行；上限 4 时第 2 层一个都未分析 -> 未找到且截断
+  const events: TEvent[] = [
+    { id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' },
+    { id: 'd', name: 'D' }, { id: 'e', name: 'E' }, { id: 'f', name: 'F' },
+  ]
+  const cs: Constraint[] = [
+    { id: 'c1', aId: 'b', bId: 'a', relation: 'later', min: 10, max: 20, enabled: true },
+    { id: 'c2', aId: 'c', bId: 'b', relation: 'later', min: 5, max: 10, enabled: true },
+    { id: 'c3', aId: 'a', bId: 'c', relation: 'later', min: 10, max: 30, enabled: true },
+    { id: 'c4', aId: 'e', bId: 'd', relation: 'later', min: 10, max: 20, enabled: true },
+    { id: 'c5', aId: 'f', bId: 'e', relation: 'later', min: 5, max: 10, enabled: true },
+    { id: 'c6', aId: 'd', bId: 'f', relation: 'later', min: 10, max: 30, enabled: true },
+  ]
+  const r2 = findMinimalRepairs(events, cs, 'a', { stateLimit: 4 })
+  assert(!r2.found && r2.truncated && !r2.optimumProven, '双环在上限 4 时截断且未找到方案')
+
+  // 上限 5：根 + 3 个一层 + 1 个二层可行状态 -> 找到 1 个最优但截断
+  const r3 = findMinimalRepairs(events, cs, 'a', { stateLimit: 5 })
+  assert(r3.found && r3.disableCount === 2 && r3.truncated, '上限 5 时找到二层最优但截断')
+  assert(r3.totalPlans === 1 && r3.optimumProven, '最少停用数 2 仍被证明，并列方案不全')
+}
+
+// ---- 最小修复：常量默认值 ----
+{
+  assert(DEFAULT_STATE_LIMIT === 2000, '默认搜索上限为 2000 个状态')
+  assert(MAX_PLANS === 5, '并列方案最多展示 5 个')
+}
+
+// ---- 最小修复：可满足系统无需修复 ----
+{
+  const s = buildConsistentSample()
+  const r = findMinimalRepairs(s.events, s.constraints, s.anchorId)
+  assert(r.found && r.plans.length === 0 && r.disableCount === 0, '可满足系统返回空方案、停用数 0')
+  assert(!r.truncated && r.optimumProven, '可满足系统不截断')
+}
+
+// ---- 最小修复：已停用 / 引用缺失事件的约束不进入候选 ----
+{
+  const s = buildContradictionSample()
+  const disabled = s.constraints.map((c, i) =>
+    i === 0 ? { ...c, enabled: false } : c,
+  )
+  // 停用环上第一条后系统本应恢复，这里再验证修复搜索候选不含已停用约束
+  const stillConflict = analyze(s.events, disabled, s.anchorId)
+  // c1 是 A<-B 约束；停用它后环被打断
+  assert(stillConflict.satisfiable, '手动停用环上一条后矛盾消除（与修复建议等价）')
+  const r = findMinimalRepairs(s.events, disabled, s.anchorId)
+  assert(r.found && r.disableCount === 0 && r.plans.length === 0, '已无可修复矛盾')
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

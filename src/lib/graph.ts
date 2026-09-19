@@ -152,6 +152,22 @@ function shortestFrom(source: number, n: number, edges: DiffEdge[]): number[] {
 }
 
 /**
+ * 超级源点 Bellman-Ford 检测负环：等价于加入一个指向所有节点、权重 0 的超级源点，
+ * 即所有节点初始距离为 0（差分约束经典做法）。找到时抽取一条负环。
+ */
+export function findNegativeCycle(
+  n: number,
+  edges: DiffEdge[],
+): { nodes: number[]; edges: DiffEdge[]; totalWeight: number } | null {
+  if (n === 0) return null
+  const { predEdge, lastRelaxed } = bellmanFord(n, edges, new Array(n).fill(0))
+  if (!lastRelaxed) return null
+  const cyc = extractCycle(lastRelaxed, predEdge)
+  if (!cyc) return null
+  return { nodes: cyc.nodes, edges: cyc.edges, totalWeight: cyc.edges.reduce((s, e) => s + e.w, 0) }
+}
+
+/**
  * 对当前全部启用的约束做完整分析：
  * 1) 超级源点 Bellman-Ford 检测差分系统是否可满足（有无负环）；
  * 2) 有负环时抽取一条矛盾环；
@@ -170,26 +186,13 @@ export function analyze(
     return { satisfiable: true, windows }
   }
 
-  // —— 负环检测：等价于加入一个指向所有节点、权重 0 的超级源点，
-  // 即所有节点初始距离为 0（差分约束经典做法）。
-  const { predEdge, lastRelaxed } = bellmanFord(
-    n,
-    edges,
-    new Array(n).fill(0),
-  )
-
-  if (lastRelaxed) {
-    const cyc = extractCycle(lastRelaxed, predEdge)
-    if (cyc) {
-      const totalWeight = cyc.edges.reduce((s, e) => s + e.w, 0)
-      return {
-        satisfiable: false,
-        cycle: { nodes: cyc.nodes, edges: cyc.edges, totalWeight },
-        windows,
-      }
+  const cyc = findNegativeCycle(n, edges)
+  if (cyc) {
+    return {
+      satisfiable: false,
+      cycle: cyc,
+      windows,
     }
-    // 理论上不会落到这里；保守起见按可满足处理但不给出窗口
-    return { satisfiable: false, windows }
   }
 
   // —— 可满足：计算时间窗
